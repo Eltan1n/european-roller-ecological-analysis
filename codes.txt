@@ -1,0 +1,173 @@
+# =============================================================================
+# Term Project - Current Topics in Ecology
+# Species: Coracias garrulus (European Roller / Gokkuzgun)
+# Study area: Turkey
+# Climate: WorldClim v2.1 (current) + CMIP6 (MIROC6) future (2041-2060)
+# Scenarios: SSP2-4.5 (245) and SSP5-8.5 (585)
+# Outputs: Fig_1_occ_and_sampling.png, Final_Project_Results.png
+# =============================================================================
+
+# --- 0) Clean session (optional but recommended)
+rm(list = ls())
+
+# --- 1) Packages
+pkgs <- c("terra", "geodata", "rgbif")
+for (p in pkgs) {
+  if (!require(p, character.only = TRUE)) install.packages(p)
+  library(p, character.only = TRUE)
+}
+
+# --- 2) Settings
+species <- "Coracias garrulus"
+gcm     <- "MIROC6"
+period  <- "2041-2060"
+
+# Output folder (your project folder on Desktop)
+folder <- "C:/Users/warlock/Desktop/gokkuzgun"
+dir.create(folder, showWarnings = FALSE, recursive = TRUE)
+
+# Use your folder as tempdir to avoid temp issues
+terraOptions(tempdir = folder)
+
+# --- 3) Turkey boundary (GADM)
+tur <- geodata::gadm("TUR", level = 0, path = folder)
+
+# --- 4) Occurrence data (GBIF) - limit for speed/stability
+# Pull a manageable amount of records; adjust limit if needed.
+occ <- rgbif::occ_search(
+  scientificName = species,
+  country = "TR",
+  limit = 20000
+)$data
+
+# Clean coordinates
+occ <- occ[!is.na(occ$decimalLongitude) & !is.na(occ$decimalLatitude), ]
+
+# Build a month column (robust to missing eventDate)
+# Prefer eventDate; if missing, use month from 'month' column if present.
+if (!is.null(occ$eventDate)) {
+  suppressWarnings({
+    occ$eventDate2 <- as.Date(occ$eventDate)
+    occ$month2 <- as.integer(format(occ$eventDate2, "%m"))
+  })
+} else {
+  occ$month2 <- NA_integer_
+}
+
+# If GBIF already has a month field, use it when month2 is NA
+if (!is.null(occ$month)) {
+  occ$month2[is.na(occ$month2)] <- occ$month[is.na(occ$month2)]
+}
+
+# Year field (GBIF usually has year)
+# If missing, try derive from eventDate2
+if (is.null(occ$year)) occ$year <- NA_integer_
+if (!is.null(occ$eventDate2)) {
+  occ$year[is.na(occ$year)] <- as.integer(format(occ$eventDate2[is.na(occ$year)], "%Y"))
+}
+
+# Convert to SpatVector points and keep those intersecting Turkey
+pres <- terra::vect(occ, geom = c("decimalLongitude", "decimalLatitude"), crs = "EPSG:4326")
+pres <- pres[terra::relate(pres, tur, "intersects"), ]
+
+# Dataframe for histograms
+pres_df <- as.data.frame(pres)
+
+# --- 5) Climate data
+# IMPORTANT: use consistent resolution for extent matching (res=10 or res=5)
+# Use res=10 to keep downloads lighter, and align with your earlier outputs.
+res_deg <- 10
+
+# Current (WorldClim v2.1 baseline 1970-2000) - BIO variables
+wc_files <- geodata::worldclim_global(var = "bio", res = res_deg, path = folder)
+wc_r <- terra::rast(wc_files)
+
+# Future (CMIP6, MIROC6, 2041-2060) - bioc variables
+f245_file <- geodata::cmip6_world(model = gcm, ssp = "245", time = period, var = "bioc", res = res_deg, path = folder)
+f585_file <- geodata::cmip6_world(model = gcm, ssp = "585", time = period, var = "bioc", res = res_deg, path = folder)
+
+f245_r <- terra::rast(f245_file)
+f585_r <- terra::rast(f585_file)
+
+# BIO1 is layer 1 in both
+bio1_cur_raw <- wc_r[[1]]
+bio1_245_raw <- f245_r[[1]]
+bio1_585_raw <- f585_r[[1]]
+
+# Crop + mask to Turkey
+bio1_cur <- terra::mask(terra::crop(bio1_cur_raw, tur), tur)
+bio1_245 <- terra::mask(terra::crop(bio1_245_raw, tur), tur)
+bio1_585 <- terra::mask(terra::crop(bio1_585_raw, tur), tur)
+
+# Delta map (warming impact)
+delta <- bio1_585 - bio1_cur
+
+# --- 6) Figure A: Occurrence + sampling effort
+png(file.path(folder, "Fig_1_occ_and_sampling.png"), width = 1800, height = 800, res = 200)
+par(mfrow = c(1, 3), mar = c(3, 3, 3, 1))
+
+plot(tur, col = "gray95", border = "gray40", main = "Occurrences (GBIF, Turkey)")
+if (nrow(pres_df) > 0) points(pres, pch = 20, cex = 0.3)
+
+hist(pres_df$year, breaks = 15, main = "Records by year", xlab = "Year")
+hist(pres_df$month2, breaks = 12, main = "Records by month", xlab = "Month")
+
+dev.off()
+par(mfrow = c(1, 1))
+
+# --- 7) Figure B: Final 2x3 panel results (your main Fig. 1 in report)
+temp_col <- rev(heat.colors(100))
+diff_col <- terra::map.pal("viridis", 100)
+
+output_file <- file.path(folder, "Final_Project_Results.png")
+png(filename = output_file, width = 3000, height = 2000, res = 300)
+
+par(mfrow = c(2, 3), mar = c(3, 3, 3, 4))
+
+# 1) Occurrence map
+plot(tur, col = "lightgrey", border = "darkgrey",
+     main = "1. Occurrence Records (Turkey)", cex.main = 1.1)
+if (nrow(pres_df) > 0) {
+  points(pres, col = "blue", pch = 20, cex = 0.4)
+  legend("bottomleft", legend = "C. garrulus", col = "blue", pch = 20, bty = "n", cex = 0.8)
+} else {
+  text(x = 35, y = 39, labels = "No Data Found", col = "red")
+}
+
+# 2) Sampling effort by year
+if (nrow(pres_df) > 0) {
+  hist(pres_df$year, main = "2. Sampling Effort (Year)",
+       xlab = "Year", col = "steelblue", border = "white")
+} else { plot.new() }
+
+# 3) Seasonality by month
+if (nrow(pres_df) > 0) {
+  hist(pres_df$month2, main = "3. Seasonality (Month)",
+       xlab = "Month", col = "darkgreen", border = "white",
+       breaks = seq(0.5, 12.5, 1), xaxt = "n")
+  axis(1, at = 1:12, labels = c("J","F","M","A","M","J","J","A","S","O","N","D"))
+} else { plot.new() }
+
+# 4) SSP2-4.5
+plot(bio1_245, main = "4. SSP2-4.5 (2041-2060)",
+     col = temp_col, axes = FALSE, box = FALSE, legend = TRUE)
+lines(tur)
+
+# 5) SSP5-8.5
+plot(bio1_585, main = "5. SSP5-8.5 (2041-2060)",
+     col = temp_col, axes = FALSE, box = FALSE, legend = TRUE)
+lines(tur)
+
+# 6) Warming impact (Delta)
+plot(delta, main = "6. Warming Impact (SSP585 - Current)",
+     col = diff_col, axes = FALSE, box = FALSE, legend = TRUE)
+lines(tur)
+# Avoid special characters that may break on Windows console
+mtext("Temp Diff (C)", side = 1, line = 1, cex = 0.7)
+
+dev.off()
+par(mfrow = c(1, 1))
+
+cat("\nDONE. Saved figures to:\n", folder, "\n",
+    "- Fig_1_occ_and_sampling.png\n",
+    "- Final_Project_Results.png\n", sep = "")
